@@ -1,36 +1,76 @@
 # OSED Environment Setup & Tooling
 
-Automated setup for **WinDbg Dark Theme**, **PyKD**, **Mona.py**, **windbglib**, **rp++**, and **epi052/osed-scripts** for OSED (Offensive Security Exploit Developer / EXP-301) lab and exam environments.
+Complete offline-ready setup for **WinDbg Dark Theme**, **PyKD**, **Mona.py**, **windbglib**, **rp++**, and **epi052/osed-scripts** for OSED (Offensive Security Exploit Developer / EXP-301) lab and exam environments.
+
+All binaries, plugins, and tools are pre-packaged directly in this repository. **Zero internet downloads or SSL/TLS calls are made during execution.**
 
 ---
 
-## ⚡ Quick One-Liner Execution (Minimal Typing)
+## ⚡ Quick Execution (Clone & Run Directly)
 
-Open PowerShell as **Administrator** and run:
-
-```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/MalavVyas/osed_scripts/main/setup.ps1 | iex
-```
-
-Or from the Windows **Run** prompt (`Win + R`) or `cmd.exe`:
+### Step 1: Clone the repository
 
 ```cmd
-powershell -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; irm https://raw.githubusercontent.com/MalavVyas/osed_scripts/main/setup.ps1 | iex"
+git clone https://github.com/MalavVyas/osed_scripts.git C:\tools\osed_scripts
+```
+
+### Step 2: Run setup.ps1 in Administrator PowerShell
+
+```powershell
+powershell -ep bypass -f C:\tools\osed_scripts\setup.ps1
+```
+
+Or from inside the directory:
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force
+.\setup.ps1
 ```
 
 ---
 
-## 🛠️ Included Plugins & Tools
+## 📂 Pre-Bundled Repository Structure
 
-| Component | Purpose & Integration |
-| :--- | :--- |
-| **WinDbg Dark Theme** | Downloads `dark.wew`, creates desktop shortcut with `-Q -WF dark.wew`, and syncs to `C:\windbg_custom.wew` for `attach-process.ps1`. |
-| **PyKD** | WinDbg Python extension (`pykd.pyd`) placed in `winext\`. Required for all Python debugging scripts. |
-| **Corelan Mona & windbglib** | Installs `mona.py` and `windbglib.py`. Runs `vcredist_x86.exe` and registers `msdia90.dll` via `regsvr32` to resolve symbol/PDB crashes. |
-| **rp++ (ROP Finder)** | Downloads `rp++` (v2.1.5) to `C:\tools\rp++.exe` (and aliases `rp.exe`). Used by `find-gadgets.py` and manual ROP construction. |
-| **epi052/osed-scripts** | Installs `find-bad-chars.py`, `find-ppr.py`, `search.py`, `egghunter.py`, `find-gadgets.py`, `shellcoder.py`, and `attach-process.ps1`. |
-| **Python Integration** | Installs `keystone-engine`, `capstone`, `ropper`, `rich`, `numpy`, and `pykd`. Copies WinDbg scripts to `<PythonDir>\Scripts` so they run directly via `!py <name>`. |
-| **Microsoft Symbols** | Configures `_NT_SYMBOL_PATH` to `srv*C:\Symbols*https://msdl.microsoft.com/download/symbols`. |
+```text
+osed_scripts/
+├── dark.wew                # WinDbg Dark Theme workspace file
+├── setup.ps1               # 100% offline local installer
+├── bin/
+│   ├── rp++.exe            # rp++ ROP gadget finder (v2.1.5)
+│   ├── rp.exe
+│   └── rp-win.exe
+├── windbg_plugins/
+│   ├── pykd.pyd            # PyKD extension for WinDbg
+│   ├── windbglib.py        # Corelan WinDbg library
+│   ├── mona.py             # Corelan Mona exploit development toolkit
+│   └── vcredist_x86.exe    # VC++ 2008 runtime & msdia90.dll
+└── osed-scripts/           # epi052 exploit scripts
+    ├── attach-process.ps1  # Auto-attacher configured for dark.wew
+    ├── egghunter.py
+    ├── find-bad-chars.py
+    ├── find-gadgets.py
+    ├── find-ppr.py
+    ├── search.py
+    ├── shellcoder.py
+    └── utils.py
+```
+
+---
+
+## 🛠️ What `setup.ps1` Configures Locally
+
+1. **WinDbg Dark Theme**:
+   - Copies `dark.wew` to `C:\tools\dark.wew` and `C:\windbg_custom.wew` (so `attach-process.ps1` uses it automatically).
+   - Creates a **Desktop shortcut** configured with `-Q -WF "C:\tools\dark.wew"`.
+2. **WinDbg Extensions & Plugins**:
+   - Copies `pykd.pyd` into WinDbg's `winext\` directory.
+   - Copies `mona.py` and `windbglib.py` into WinDbg root.
+   - Installs `vcredist_x86.exe` and registers `msdia90.dll` via `regsvr32` to ensure `mona` symbol parsing works.
+3. **Exploit Dev Binaries & Tooling**:
+   - Deploys `rp++` (`rp++.exe` / `rp.exe`) and `osed-scripts` to `C:\tools`.
+   - Adds `C:\tools\bin` and `C:\tools\osed-scripts` to User `PATH`.
+   - Copies `find-bad-chars.py`, `find-ppr.py`, `search.py`, `mona.py`, and `utils.py` to Python's `Scripts\` folder so they can be run directly inside WinDbg as `!py <name>`.
+4. **Symbols**:
+   - Sets `_NT_SYMBOL_PATH` to `srv*C:\Symbols*https://msdl.microsoft.com/download/symbols`.
 
 ---
 
