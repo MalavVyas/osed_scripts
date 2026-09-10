@@ -4,7 +4,7 @@
     Complete Automated OSED Environment Setup for WinDbg
 .DESCRIPTION
     Configures WinDbg and all essential tooling required for Offensive Security Exploit Developer (EXP-301 / OSED):
-    1. Downloads lololosys/windbg-theme (dark.wew) and configures C:\windbg_custom.wew.
+    1. Downloads lololosys/windbg-theme (dark.wew) and configures C:\windbg_custom.wew (with offline Base64 fallback).
     2. Auto-locates 32-bit WinDbg (x86) and creates a configured Desktop shortcut (-Q -WF dark.wew).
     3. Installs PyKD (Python extension for WinDbg) into winext\.
     4. Installs Corelan mona.py & windbglib.py for WinDbg.
@@ -23,8 +23,73 @@ param(
 
 $ErrorActionPreference = "Continue"
 
-# Enable TLS 1.2 & TLS 1.3 for secure downloads
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
+# -------------------------------------------------------------
+# 0. Global SSL/TLS & Strong Crypto Fixes
+# -------------------------------------------------------------
+# Force TLS 1.2 (3072) and TLS 1.3 (12288) in .NET
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor 3072 -bor 12288
+    # Bypass untrusted / outdated root certificate errors in lab VMs
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+} catch {}
+
+# Enable Strong Crypto and SystemDefaultTls in registry for .NET Framework (requires Admin)
+try {
+    Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319' -Name 'SchUseStrongCrypto' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319' -Name 'SystemDefaultTlsVersions' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\.NETFramework\v4.0.30319' -Name 'SchUseStrongCrypto' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\.NETFramework\v4.0.30319' -Name 'SystemDefaultTlsVersions' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+} catch {}
+
+# Universal multi-fallback download function
+function Download-RemoteFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$Url,
+        [Parameter(Mandatory=$true)][string]$Destination
+    )
+    
+    # 1. Try curl.exe (built into modern Windows, bypasses .NET Schannel/TLS issues)
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        try {
+            & $curl.Source -k -sSL -L "$Url" -o "$Destination"
+            if ((Test-Path $Destination) -and ((Get-Item $Destination).Length -gt 0)) {
+                return $true
+            }
+        } catch {}
+    }
+
+    # 2. Try Invoke-WebRequest with TLS 1.2 and cert bypass
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor 3072 -bor 12288
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+        Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        if ((Test-Path $Destination) -and ((Get-Item $Destination).Length -gt 0)) {
+            return $true
+        }
+    } catch {}
+
+    # 3. Try System.Net.WebClient
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add("User-Agent", "Mozilla/5.0")
+        $wc.DownloadFile($Url, $Destination)
+        if ((Test-Path $Destination) -and ((Get-Item $Destination).Length -gt 0)) {
+            return $true
+        }
+    } catch {}
+
+    # 4. Try certutil.exe (built-in Windows utility)
+    try {
+        Start-Process -FilePath "certutil.exe" -ArgumentList "-urlcache -split -f `"$Url`" `"$Destination`"" -Wait -NoNewWindow -ErrorAction SilentlyContinue
+        Start-Process -FilePath "certutil.exe" -ArgumentList "-urlcache -split -f `"$Url`" delete" -Wait -NoNewWindow -ErrorAction SilentlyContinue
+        if ((Test-Path $Destination) -and ((Get-Item $Destination).Length -gt 0)) {
+            return $true
+        }
+    } catch {}
+
+    return $false
+}
 
 Write-Host @"
 =============================================================
@@ -96,23 +161,26 @@ if ($WinDbgPath) {
 }
 
 # -------------------------------------------------------------
-# 3. Download dark.wew WinDbg Theme
+# 3. Setup dark.wew WinDbg Theme (With Embedded Offline Fallback)
 # -------------------------------------------------------------
-$ThemeUrl = "https://raw.githubusercontent.com/lololosys/windbg-theme/master/dark.wew"
 $ThemeFile = Join-Path $InstallDir "dark.wew"
 $CustomWew = "C:\windbg_custom.wew"
+$ThemeUrl = "https://raw.githubusercontent.com/lololosys/windbg-theme/master/dark.wew"
 
-Write-Host "[+] Downloading WinDbg dark theme (dark.wew)..." -ForegroundColor Cyan
-try {
-    Invoke-WebRequest -Uri $ThemeUrl -OutFile $ThemeFile -UseBasicParsing -ErrorAction Stop
-    Write-Host "[+] Saved theme: $ThemeFile" -ForegroundColor Green
-    try {
-        Copy-Item -Path $ThemeFile -Destination $CustomWew -Force -ErrorAction SilentlyContinue
-        Write-Host "[+] Synced theme to: $CustomWew (for attach-process.ps1)" -ForegroundColor Green
-    } catch {}
-} catch {
-    Write-Warning "[-] Failed to download dark.wew: $_"
+Write-Host "[+] Setting up WinDbg dark theme (dark.wew)..." -ForegroundColor Cyan
+$downloadSuccess = Download-RemoteFile -Url $ThemeUrl -Destination $ThemeFile
+
+if (-not $downloadSuccess -or -not (Test-Path $ThemeFile)) {
+    Write-Host "[*] Network download failed; extracting embedded dark.wew offline copy..." -ForegroundColor Yellow
+    $darkWewBase64 = "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aABvAGwAZAAxAC4AYwAAAAIAEAAEABkZGQAAAAAABAADABAABAAAAAAAIAAgAAQAAQBwAmgCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD///8PAAAAAAAAAAABAAAAAQAAAAEAAAD8////QwAAAOsDAABfAQAABQAAAP///w8BAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA////DwAAAAAAAAAAAwAAAAAAAAABAAAAvAMAAEUAAACaBQAAsAEAAAAAAAD///8PAAAAAAAAAAAEAAAAAQAAAAEAAABoAwAAlQIAAJkGAACJAwAABQAAAAcAAAALAAAAAAAAAAUAAAABAAAAAQAAAAEBAAAHAQAAvQMAAJcCAAACAAAA////DwYAAAAAAAAABgAAAAEAAAABAAAAgQAAAFABAAAtAwAA0AIAAAEAAAAAAACAAAAAAAAAAAAHAAAAAAAAAAEAAAD8AgAARQAAAJoFAACUAAAAAAAAAP///w8AAAAAAAAAAAgAAAABAAAAAQAAAM0BAABBAAAApAMAAB0CAAADAAAAAwAAAAUAAAAAAAAACQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD///8PAAAAAAAAAAAKAAAAAAAAAAEAAAC8AwAARQAAAJoFAACwAQAAAAAAAP///w8AAAAAAAAAAAsAAAAAAAAAAQAAALwDAABFAAAAmgUAALABAAAAAAAA////DwAAAAAAAAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD///8PAAAAAAAAAAANAAAAAAAAAAEAAAC8AAAAwQAAAEQDAACwAQAAAgAAAAMAAAAFAAAA7wAAAAAAAwAQAAgACQAAAPgMAAABAAEAOAAsACwAAAACAAAAAwAAAP////////////////////8AAAAA1AAAAKwFAADzAwAABgAAAAMAAwB4AG4ABwAAAAYAAABkAAAAFAAAAP///w////8PBAEAAP4CAABHAAAAmAUAAJIAAAAHAAAAAQAAAAEAAABQAAAAegAAAAwDAAAKAgAAAgAAAAEAAAAEAAAAAAAAAP///w////8P////D////w8AAAAAAAAAAAMAAwCAAHQACgAAAAUAAABkAAAAFAAAAP///w////8PBQEAAL4DAABHAAAAmAUAAK4BAAAKAAAAAQAAAAEAAABAAAAAagAAAPwCAAD6AQAABQAAAAQAAAADAAAAAAAAAP///w////8P////D////w8AAAAAAAAAABQAAADLAwAAAwADAIAAdAADAAAABAAAAGQAAAAUAAAA////D////w8FAQAAvgMAAEcAAACYBQAArgEAAAMAAAABAAAAAQAAAE4EAABcAgAAhAcAAHEDAAAFAAAABwAAAAsAAAAAAAAA////D////w////8P////DwAAAAAAAAAAAAAAAAYAAAADAAMAeABsAAsAAAAHAAAAZAAAABQAAAD///8P////DwQBAAC+AwAARwAAAJgFAACuAQAACwAAAAEAAAABAAAAYAAAAIoAAAAcAwAAGgIAAAUAAAAFAAAACgAAAAAAAAD///8P////D////w////8PAAAAACAAIAADAAMAkACGAAgAAAAIAAAAZAAAABQAAAAAAACACAAAQAcAAACEAgAAAAAAALUEAADSAQAACAAAAAEAAAABAAAAzQEAAEEAAACkAwAAHQIAAAMAAAADAAAABQAAAAAAAAAAAACAAwAAQAMAAAAIAAAAAQAAAAAAAAADAAAAAQAAABEAAABAAGUAcwBwAAAAAAADAAMAeABsAAQAAAABAAAAZAAAABQAAAAAAACAAQAAQAcAAAC1BAAAAAAAAKMGAACkAQAABAAAAAEAAAABAAAAaAMAAJUCAACZBgAAiQMAAAUAAAAHAAAACwAAAAAAAAAAAACAAgAAQAEAAAACAAAAAgAAAEAAZQADAAMAkACGAAgAAAACAAAAZAAAABQAAAAAAACAAQAAQAcAAAC1BAAApAEAAKMGAAACAwAACAAAAAEAAAABAAAAEAAAADoAAADMAgAAygEAAAMAAAAAAAAABgAAAAAAAAAAAACA////DwMAAEABAABAAQAAAAAAAAARAAAAAQAAAAEAAABAAGUAcwBwAAAAAAADAAMAgAB0AAYAAAAAAAAAZAAAABQAAAAAAACAAwAAQAYAAAAAAAAA0gEAALUEAAACAwAABgAAAAEAAAABAAAAgQAAAFABAAAtAwAA0AIAAAEAAAAAAACAAAAAAAAAAAD///8P////D////w////8PAAAAAN////8AAAAAAABmAAMAAwCAAHgABQAAAAMAAABkAAAAFAAAAAAAAIAIAABABwAAAAAAAAAAAAAAhAIAANIBAAAFAAAAAQAAAAEAAAABAQAABwEAAL0DAACXAgAAAgAAAAAAAAAGAAAAAAAAAAAAAIACAABACAAAQAAAAAACAAAAAQAAAAAAAAABAAAAAQADABAABAAJAAAAIAAgADUAAAAwASYBLgBsAG8AYQBkACAAQwA6AFwAUAByAG8AZwByAGEAbQAgAEYAaQBsAGUAcwBcAEQAZQBiAHUAZwBnAGkAbgBnACAAVABvAG8AbABzACAAZgBvAHIAIABXAGkAbgBkAG8AdwBzACAAKAB4ADgANgApAFwAdwBpAG4AZQB4AHQAXABwAHkAawBkAC4AcAB5AGQACgAuAGwAbwBhAGQAIABDADoAXABQAHIAbwBnAHIAYQBtACAARgBpAGwAZQBzAFwARABlAGIAdQBnAGcAaQBuAGcAIABUAG8AbwBsAHMAIABmAG8AcgAgAFcAaQBuAGQAbwB3AHMAIAAoAHgAOAA2ACkAXAB3AGkAbgBlAHgAdABcAHAAeQBrAGQALgBwAHkAZAAKAAAAAABEAAAAEAAEAAEAAAAAAAAAMwAAAGgAXADw////AAAAAAAAAAAAAAAAkAEAAAAAAAADAgExQwBvAG4AcwBvAGwAYQBzAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    [IO.File]::WriteAllBytes($ThemeFile, [Convert]::FromBase64String($darkWewBase64))
 }
+
+Write-Host "[+] Saved theme: $ThemeFile" -ForegroundColor Green
+try {
+    Copy-Item -Path $ThemeFile -Destination $CustomWew -Force -ErrorAction SilentlyContinue
+    Write-Host "[+] Synced theme to: $CustomWew (for attach-process.ps1)" -ForegroundColor Green
+} catch {}
 
 # -------------------------------------------------------------
 # 4. Create Desktop Shortcut for WinDbg (Dark Theme)
@@ -148,50 +216,43 @@ $MonaUrl = "https://raw.githubusercontent.com/corelan/mona/master/mona.py"
 $TempPykdZip = Join-Path $env:TEMP "pykd.zip"
 $TempPykdExtract = Join-Path $env:TEMP "pykd-extract"
 
-try {
-    # Download Corelan PyKD package (contains pykd.pyd and vcredist_x86.exe)
-    Invoke-WebRequest -Uri $PykdZipUrl -OutFile $TempPykdZip -UseBasicParsing -ErrorAction Stop
-    if (Test-Path $TempPykdExtract) { Remove-Item $TempPykdExtract -Recurse -Force }
-    Expand-Archive -Path $TempPykdZip -DestinationPath $TempPykdExtract -Force
+if (Download-RemoteFile -Url $PykdZipUrl -Destination $TempPykdZip) {
+    try {
+        if (Test-Path $TempPykdExtract) { Remove-Item $TempPykdExtract -Recurse -Force }
+        Expand-Archive -Path $TempPykdZip -DestinationPath $TempPykdExtract -Force
 
-    # Install pykd.pyd into winext
-    if (Test-Path "$TempPykdExtract\pykd.pyd") {
-        if (Test-Path (Join-Path $WinExtDir "pykd.pyd")) {
-            Copy-Item -Path (Join-Path $WinExtDir "pykd.pyd") -Destination (Join-Path $WinExtDir "pykd.pyd.bak") -Force -ErrorAction SilentlyContinue
+        # Install pykd.pyd into winext
+        if (Test-Path "$TempPykdExtract\pykd.pyd") {
+            if (Test-Path (Join-Path $WinExtDir "pykd.pyd")) {
+                Copy-Item -Path (Join-Path $WinExtDir "pykd.pyd") -Destination (Join-Path $WinExtDir "pykd.pyd.bak") -Force -ErrorAction SilentlyContinue
+            }
+            Copy-Item -Path "$TempPykdExtract\pykd.pyd" -Destination $WinExtDir -Force -ErrorAction SilentlyContinue
+            Copy-Item -Path "$TempPykdExtract\pykd.pyd" -Destination $WinDbgDir -Force -ErrorAction SilentlyContinue
+            Write-Host "[+] Installed pykd.pyd into $WinExtDir" -ForegroundColor Green
         }
-        Copy-Item -Path "$TempPykdExtract\pykd.pyd" -Destination $WinExtDir -Force -ErrorAction SilentlyContinue
-        Copy-Item -Path "$TempPykdExtract\pykd.pyd" -Destination $WinDbgDir -Force -ErrorAction SilentlyContinue
-        Write-Host "[+] Installed pykd.pyd into $WinExtDir" -ForegroundColor Green
-    }
 
-    # Install VC++ 2008 / msdia90.dll if present
-    if (Test-Path "$TempPykdExtract\vcredist_x86.exe") {
-        Write-Host "[+] Installing VC++ runtime for msdia90.dll..." -ForegroundColor Cyan
-        Start-Process -FilePath "$TempPykdExtract\vcredist_x86.exe" -ArgumentList "/q" -Wait -ErrorAction SilentlyContinue
+        # Install VC++ 2008 / msdia90.dll if present
+        if (Test-Path "$TempPykdExtract\vcredist_x86.exe") {
+            Write-Host "[+] Installing VC++ runtime for msdia90.dll..." -ForegroundColor Cyan
+            Start-Process -FilePath "$TempPykdExtract\vcredist_x86.exe" -ArgumentList "/q" -Wait -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-Warning "[-] PyKD extract failed: $_"
+    } finally {
+        Remove-Item $TempPykdZip -Force -ErrorAction SilentlyContinue
+        Remove-Item $TempPykdExtract -Recurse -Force -ErrorAction SilentlyContinue
     }
-} catch {
-    Write-Warning "[-] PyKD zip download failed: $_"
-} finally {
-    Remove-Item $TempPykdZip -Force -ErrorAction SilentlyContinue
-    Remove-Item $TempPykdExtract -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # Download windbglib.py and mona.py into WinDbg directory
 $MonaDest = Join-Path $WinDbgDir "mona.py"
 $WindbglibDest = Join-Path $WinDbgDir "windbglib.py"
 
-try {
-    Invoke-WebRequest -Uri $WindbglibUrl -OutFile $WindbglibDest -UseBasicParsing -ErrorAction Stop
+if (Download-RemoteFile -Url $WindbglibUrl -Destination $WindbglibDest) {
     Write-Host "[+] Installed windbglib.py -> $WindbglibDest" -ForegroundColor Green
-} catch {
-    Write-Warning "[-] Could not download windbglib.py: $_"
 }
-
-try {
-    Invoke-WebRequest -Uri $MonaUrl -OutFile $MonaDest -UseBasicParsing -ErrorAction Stop
+if (Download-RemoteFile -Url $MonaUrl -Destination $MonaDest) {
     Write-Host "[+] Installed mona.py -> $MonaDest" -ForegroundColor Green
-} catch {
-    Write-Warning "[-] Could not download mona.py: $_"
 }
 
 # Register msdia90.dll (required by mona for symbol/structure parsing)
@@ -216,23 +277,22 @@ $TempRpZip = Join-Path $env:TEMP "rp-win.zip"
 $TempRpExtract = Join-Path $env:TEMP "rp-extract"
 $RpExe = Join-Path $InstallDir "rp-win.exe"
 
-try {
-    Invoke-WebRequest -Uri $RpUrl -OutFile $TempRpZip -UseBasicParsing -MaximumRedirection 10 -ErrorAction Stop
-    if (Test-Path $TempRpExtract) { Remove-Item $TempRpExtract -Recurse -Force }
-    Expand-Archive -Path $TempRpZip -DestinationPath $TempRpExtract -Force
-    
-    if (Test-Path "$TempRpExtract\rp-win.exe") {
-        Copy-Item -Path "$TempRpExtract\rp-win.exe" -Destination $RpExe -Force
-        # Also copy as rp++.exe and rp.exe for convenient command-line use
-        Copy-Item -Path "$TempRpExtract\rp-win.exe" -Destination (Join-Path $InstallDir "rp++.exe") -Force
-        Copy-Item -Path "$TempRpExtract\rp-win.exe" -Destination (Join-Path $InstallDir "rp.exe") -Force
-        Write-Host "[+] Installed rp++ -> $RpExe (aliased to rp++.exe and rp.exe)" -ForegroundColor Green
+if (Download-RemoteFile -Url $RpUrl -Destination $TempRpZip) {
+    try {
+        if (Test-Path $TempRpExtract) { Remove-Item $TempRpExtract -Recurse -Force }
+        Expand-Archive -Path $TempRpZip -DestinationPath $TempRpExtract -Force
+        
+        if (Test-Path "$TempRpExtract\rp-win.exe") {
+            Copy-Item -Path "$TempRpExtract\rp-win.exe" -Destination $RpExe -Force
+            Copy-Item -Path "$TempRpExtract\rp-win.exe" -Destination (Join-Path $InstallDir "rp++.exe") -Force
+            Copy-Item -Path "$TempRpExtract\rp-win.exe" -Destination (Join-Path $InstallDir "rp.exe") -Force
+            Write-Host "[+] Installed rp++ -> $RpExe (aliased to rp++.exe and rp.exe)" -ForegroundColor Green
+        }
+    } catch {}
+    finally {
+        Remove-Item $TempRpZip -Force -ErrorAction SilentlyContinue
+        Remove-Item $TempRpExtract -Recurse -Force -ErrorAction SilentlyContinue
     }
-} catch {
-    Write-Warning "[-] Could not download rp++: $_"
-} finally {
-    Remove-Item $TempRpZip -Force -ErrorAction SilentlyContinue
-    Remove-Item $TempRpExtract -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # -------------------------------------------------------------
@@ -255,19 +315,20 @@ if (Test-Path (Join-Path $OsedDir ".git")) {
     $ZipPath = Join-Path $env:TEMP "osed-scripts.zip"
     $ExtractPath = Join-Path $env:TEMP "osed-scripts-extract"
 
-    try {
-        Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath -UseBasicParsing -ErrorAction Stop
-        if (Test-Path $ExtractPath) { Remove-Item $ExtractPath -Recurse -Force }
-        Expand-Archive -Path $ZipPath -DestinationPath $ExtractPath -Force
+    if (Download-RemoteFile -Url $ZipUrl -Destination $ZipPath) {
+        try {
+            if (Test-Path $ExtractPath) { Remove-Item $ExtractPath -Recurse -Force }
+            Expand-Archive -Path $ZipPath -DestinationPath $ExtractPath -Force
 
-        if (-not (Test-Path $OsedDir)) { New-Item -ItemType Directory -Path $OsedDir -Force | Out-Null }
-        Copy-Item -Path "$ExtractPath\osed-scripts-main\*" -Destination $OsedDir -Recurse -Force
-        Write-Host "[+] Extracted osed-scripts to $OsedDir" -ForegroundColor Green
-    } catch {
-        Write-Warning "[-] Failed to download/extract osed-scripts: $_"
-    } finally {
-        Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
-        Remove-Item $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path $OsedDir)) { New-Item -ItemType Directory -Path $OsedDir -Force | Out-Null }
+            Copy-Item -Path "$ExtractPath\osed-scripts-main\*" -Destination $OsedDir -Recurse -Force
+            Write-Host "[+] Extracted osed-scripts to $OsedDir" -ForegroundColor Green
+        } catch {
+            Write-Warning "[-] Failed to extract osed-scripts: $_"
+        } finally {
+            Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
+            Remove-Item $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
