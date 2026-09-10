@@ -9,13 +9,13 @@ Automated setup for **WinDbg Dark Theme**, **PyKD**, **Mona.py**, **windbglib**,
 Open PowerShell as **Administrator** and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/MalavVyas/osed_scripts/main/setup.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/MalavVyas/osed_scripts/main/setup.ps1 | iex
 ```
 
 Or from the Windows **Run** prompt (`Win + R`) or `cmd.exe`:
 
 ```cmd
-powershell -ep bypass -c "irm https://raw.githubusercontent.com/MalavVyas/osed_scripts/main/setup.ps1 | iex"
+powershell -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; irm https://raw.githubusercontent.com/MalavVyas/osed_scripts/main/setup.ps1 | iex"
 ```
 
 ---
